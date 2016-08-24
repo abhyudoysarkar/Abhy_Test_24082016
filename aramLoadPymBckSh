@@ -1,0 +1,1260 @@
+#!/bin/ksh -vx
+#====================================================================
+#Program Name:aramLoadPymBckSh
+#Description:Load Payment and backout data received as csv to table
+#====================================================================
+#====================================================================
+# Change #1  :
+# Defect     : 6623-6624
+# Description: Handling Null Amounts in the input file 
+# Date       : April 2009
+# By         : Raju Pericharla
+# Supervisor : Abhyuodoy Sarkar
+#====================================================================
+# Change #2  :
+# Defect     : 6609
+# Description: Handling Huge  Amounts in the input file
+#              In case of having very huge amounts in input file i.e
+#              greater than 9999999999.99 we will reject the file
+#              by placing the payment amount as 9999999999.99 in 
+#              colchq_file_ctrl table.
+# Date       : April 2009
+# By         : Raju Pericharla
+# Supervisor : Abhyuodoy Sarkar
+#====================================================================
+
+
+
+ExitProcess ()
+{
+
+ 
+case $1 in 
+    "0" ) echo " aramLoadPymBckSh: Completed successfully."
+          exit 0
+          ;;
+    "1" ) echo " aramLoadPymBckSh stopped due to an error .."
+          exit 1
+          ;;
+    "2" ) echo "Error in aramLoadPymBckSh,Skipping the file"
+
+          #################################################################
+          # Rename the input file to error
+          #################################################################
+
+          mv $TLG_BLK_FILE_IN/${FILE_NAME} $TLG_BLK_FILE_IN/$FAIL_FILE_NAME
+
+          #################################################################
+          # Before exiting remove file from work
+          #################################################################
+
+          if TLG_AR_WORK_EQUAL_BULK_FNDT=1
+          then
+              \rm $TLG_AR_WORK/$FILE_NAME
+          fi
+
+          ;;     
+      * ) echo "aramLoadPymBckSh stopped due to an error with status $1"
+
+          #################################################################
+          # Rename the input file to error
+          #################################################################
+
+          mv $TLG_BLK_FILE_IN/${FILE_NAME} $TLG_BLK_FILE_IN/$FAIL_FILE_NAME
+          
+          #################################################################
+          # Before exiting remove file from work
+          #################################################################
+
+          if TLG_AR_WORK_EQUAL_BULK_FNDT=1
+          then          
+              \rm $TLG_AR_WORK/$FILE_NAME            
+          fi
+
+          exit $1
+          ;;
+  esac
+}
+
+###################################################################################
+# Update status in COLCHQ_FILE_CONTROL
+###################################################################################
+update_status_in_control ()
+{
+
+echo "In update_status_in_control"
+
+export USC_AGENCY=$1
+export USC_CHEQUE_NO=$2
+export USC_FILE_NAME=$3
+export USC_FILE_STATUS=$4
+
+echo "AGECY="$USC_AGENCY" CHEQUE_NO="$USC_CHEQUE_NO" FILE_NAME="$USC_FILE_NAME" FILE_STATUS="$FILE_STATUS
+
+sqlplus -s $ORA_CONNECT_STRING <<!
+
+update colchq_file_ctrl
+set file_status='$USC_FILE_STATUS'
+where agency='$USC_AGENCY'
+and check_no='$USC_CHEQUE_NO'
+and file_name='$USC_FILE_NAME';
+
+commit;
+
+!
+echo "Status updated in colchk_file_control"
+}
+################################################################################
+# Function to create temporary table for loading data by SQL Loader
+################################################################################
+create_temp_table ()
+{
+
+echo "In create_temp_table"
+
+sqlplus -s $ORA_CONNECT_STRING <<!
+
+drop table load_agn_pym_bck_data;
+
+create table load_agn_pym_bck_data(
+ban           number(9),
+amount        number(12,2));
+
+!
+echo "Temporary table created"
+}
+################################################################################
+# Function to verify duplicate file
+################################################################################
+verify_duplicate_iput_file(){
+
+export DUP_FILE_NAME=$1
+export DUP_AGENCY=$2
+export DUP_CHEQUE_NO=$3
+
+echo "Input File Name is "$DUP_FILE_NAME
+echo "Agecy Name is "$DUP_AGENCY
+echo "Cheque Number is "$DUP_CHEQUE_NO
+
+export DUP_FILE='ar.AgencyFileDuplicateValidation.'$DATE'_'$TIME'.extract'
+echo $DUP_FILE
+
+sqlplus -s $ORA_CONNECT_STRING <<!
+	      	      
+WHENEVER SQLERROR  EXIT SQL.SQLCODE;
+set pages 0
+set colsep ','
+set lines 100
+set echo off
+set feed off
+set verify off
+set timing off
+
+spool $DUP_FILE
+
+select 'FILE_EXISTS' 
+from colchq_file_ctrl
+where file_name='$DUP_FILE_NAME'
+or ( agency='$DUP_AGENCY'
+and check_no='$DUP_CHEQUE_NO');
+
+spool off
+!
+
+export DUPLICATE_FILE_IND=`less ${DUP_FILE}|grep 'FILE_EXISTS'|wc -l`
+
+echo "DUPLICATE_FILE_IND="$DUPLICATE_FILE_IND
+
+rm -f $DUP_FILE
+
+}
+
+#---------- Change #1 Starts---
+delete_agency_entries(){
+
+export AGENCY=$1
+export CHEQUE_NO=$2
+
+sqlplus -s $ORA_CONNECT_STRING <<!
+       
+WHENEVER SQLERROR  EXIT SQL.SQLCODE;
+set echo off
+set feed off
+set verify off
+set timing off
+
+delete from agency_pym_bck_request
+where  agency='$AGENCY'
+and check_no='$CHEQUE_NO';
+
+commit;
+
+!
+
+}
+#----------- Change #1 Ends ---- 
+################################################################################
+# Function to load records from temporary table to COLCHQ_FILE_CTRL table
+################################################################################
+load_to_colchq_file_control ()
+{
+
+echo "In load_to_agency_pym_bck_request"
+
+export V_FILE_NAME=$1
+export V_AGENCY=$2
+export V_CHEQUE_NO=$3
+export V_FILE_STATUS=$4
+export V_PMT_AMOUNT=$5
+export V_PMT_COUNT=$6
+export V_BCK_AMOUNT=$7
+export V_BCK_COUNT=$8
+export V_TOTAL_COUNT=$9
+
+echo "FILE_NAME  ="$V_FILE_NAME
+echo "AGENCY     ="$V_AGENCY
+echo "CHEQUE_NO  ="$V_CHEQUE_NO
+echo "FILE_STATUS="$V_FILE_STATUS
+echo "PMT_AMOUNT ="$V_PMT_AMOUNT
+echo "PMT_COUNT  ="$V_PMT_COUNT
+echo "BCK_AMOUNT ="$V_BCK_AMOUNT
+echo "BCK_COUNT  ="$V_BCK_COUNT
+echo "TOTAL_COUNT="$V_TOTAL_COUNT
+
+sqlplus -s $ORA_CONNECT_STRING <<!
+
+WHENEVER SQLERROR  EXIT SQL.SQLCODE;
+
+DECLARE
+
+/* ---Declare varaibles ---*/
+v_file_seq_no          number(5);
+v_file_date            date;
+v_file_name            char(45);
+v_agency               char(8);
+v_cheque_no            char(15);
+v_file_status          char(2);
+v_pmt_amount           number(12,2);
+v_pmt_count            number(4);
+v_bck_amount           number(12,2);
+v_bck_count            number(4);
+v_total_count          number(4);
+
+/* --- Control variables ---*/
+v_sys_creation_date    date;
+v_sys_update_date      date;
+v_operator_id          number(9);
+v_application_id       char(6);
+v_dl_service_code      char(5);
+v_dl_update_stamp      number(4);
+
+BEGIN
+
+     /* --- Populate the sequence ---*/
+
+     select COLCHQ_FILE_CTRL_1SQ.nextval
+     into v_file_seq_no
+     from dual;
+
+     select logical_date
+     into v_file_date
+     from logical_date where logical_date_type='B';
+
+
+  v_file_name   :='$V_FILE_NAME';
+  v_agency      :='$V_AGENCY';
+  v_cheque_no   :='$V_CHEQUE_NO';
+  v_file_status :='$V_FILE_STATUS';
+  v_pmt_amount  :='$V_PMT_AMOUNT';
+  v_pmt_count   :='$V_PMT_COUNT';
+  v_bck_amount  :='$V_BCK_AMOUNT';
+  v_bck_count   :='$V_BCK_COUNT';
+  v_total_count :='$V_TOTAL_COUNT';
+  
+    /*--- Populate control fields ---*/
+
+   v_sys_creation_date:=sysdate;
+   v_sys_update_date  :=sysdate;
+   v_operator_id      :=NULL;
+   v_application_id   :=null;
+   v_dl_service_code  :='DL05';
+   v_dl_update_stamp  :=null;
+
+   insert into COLCHQ_FILE_CTRL values (v_file_seq_no,
+                                        v_sys_creation_date,
+                                        v_sys_update_date,
+                                        v_operator_id,
+                                        v_application_id,
+                                        v_dl_service_code,
+                                        v_dl_update_stamp,
+                                        v_file_date,
+                                        v_file_name,
+                                        v_agency,
+                                        v_cheque_no,
+                                        v_file_status,
+                                        v_pmt_amount,
+                                        v_pmt_count,
+                                        v_bck_amount,
+                                        v_bck_count,
+                                        v_total_count);
+                                        
+  EXCEPTION
+      WHEN OTHERS THEN
+              dbms_output.put_line ('SQL error code   : '||SQLCODE);
+              dbms_output.put_line ('SQL error message: '||SQLERRM);
+END;
+/
+commit;
+ 
+!
+}
+################################################################################
+# Function to load records from temporary table to AGENCY_PYM_BCK_REQUEST table 
+################################################################################
+load_to_agency_pym_bck_request ()
+{
+
+echo "In load_to_agency_pym_bck_request"
+
+export AGENCY_CODE=$1
+export CHEQUE_NO=$2
+
+echo "AGENCY_CODE="$AGENCY_CODE
+echo "CHEQUE_NO="$CHEQUE_NO
+
+echo "Entered our function"
+export ERR_LOAD_FILE='ar.agencypymbckload.err'
+echo $ERR_LOAD_FILE
+
+sqlplus -s $ORA_CONNECT_STRING <<!
+
+WHENEVER SQLERROR  EXIT SQL.SQLCODE;
+
+spool $ERR_LOAD_FILE
+set serveroutput on size 1000000
+set timing on
+
+
+DECLARE
+
+
+CURSOR maincur IS
+select * from  load_agn_pym_bck_data; 
+/* ---Declare cursor record type ---*/
+rec maincur%ROWTYPE;
+
+/* ---Declare varaibles ---*/
+v_ent_seq_no           number(9);
+v_actv_date            date;
+v_ban                  number(9);
+v_agency               char(8);
+v_actv_code            char(4);
+v_amount               number(12,2);
+v_bank_code            char(4);
+v_bank_account_no      char(18);
+v_bank_branch_no       char(5);
+v_cheque_no            char(15);
+v_pym_seq_no           number(9);
+v_eca_ban              number(9);
+v_req_status           char(1);
+v_error_code           char(4);
+v_file_seq_no          number(5);
+
+/* --- Control variables ---*/
+v_sys_creation_date    date;
+v_sys_update_date      date;
+v_operator_id          number(9);
+v_application_id       char(6);
+v_dl_service_code      char(5);
+v_dl_update_stamp      number(4);
+
+v_trx_count            number;
+
+BEGIN
+
+  dbms_output.enable;
+
+  OPEN maincur;
+
+  /* ---Start outer loop on cursor opened on table containing impacted record --*/
+ v_trx_count:=0;
+
+  LOOP fetch maincur into rec;
+     exit when maincur%NOTFOUND;
+     
+     /* --- Populate the sequence ---*/
+     
+     select AGENCY_PYM_BCK_REQUEST_1SQ.nextval
+     into v_ent_seq_no
+     from dual;
+    
+     select logical_date
+     into v_actv_date
+     from logical_date where logical_date_type='B';
+     
+     v_ban:=rec.ban;
+     v_agency:='$AGENCY_CODE';
+     
+     if (rec.amount>=0)
+     then
+     
+        v_actv_code:='PYM';
+        v_amount:=rec.amount;
+        
+     else
+     
+        v_actv_code:='BCK';
+        v_amount:=rec.amount*(-1);
+        
+     end if;
+
+     
+     v_cheque_no:='$CHEQUE_NO';
+     
+     v_eca_ban:=0;
+     v_req_status:='P';
+     v_error_code:=null;
+
+     v_pym_seq_no:=0;
+     
+
+     select file_seq_no
+     into v_file_seq_no
+     from colchq_file_ctrl
+     where agency=v_agency
+     and check_no=v_cheque_no;
+
+     
+     /*--- Populate control fields ---*/
+     
+     v_sys_creation_date:=sysdate;
+     v_sys_update_date  :=sysdate;
+     v_operator_id      :=null;
+     v_application_id   :=null;
+     v_dl_service_code  :='DL05';
+     v_dl_update_stamp  :=null;
+     
+     /*--- Fetch Bank Details ---*/
+     
+     select bank_code,bank_account_no,bank_branch_no
+     into v_bank_code,v_bank_account_no,v_bank_branch_no
+     from agency_bank_details
+     where agency=v_agency;
+
+     
+     insert into agency_pym_bck_request values(v_ent_seq_no,
+                                               v_sys_creation_date,
+                                               v_sys_update_date,
+                                               v_operator_id,
+                                               v_application_id,
+                                               v_dl_service_code,
+                                               v_dl_update_stamp,
+                                               v_actv_date,
+                                               v_ban,
+                                               v_agency,
+                                               v_actv_code,
+                                               v_amount,
+                                               v_bank_code,
+                                               v_bank_account_no,
+                                               v_bank_branch_no,
+                                               v_cheque_no,
+                                               v_pym_seq_no,
+                                               v_eca_ban,
+                                               v_req_status,
+                                               v_error_code,
+                                               v_file_seq_no);
+    
+     
+     v_trx_count:=v_trx_count+1;
+
+  END LOOP;
+
+  EXCEPTION
+      WHEN OTHERS THEN
+              dbms_output.put_line('ERROR');
+              dbms_output.put_line ('SQL error code   : '||SQLCODE);
+              dbms_output.put_line ('SQL error message: '||SQLERRM(0)); 
+CLOSE maincur;
+END;
+/
+commit;
+spool off
+!
+export ERR_LOAD_IND=`less ${ERR_LOAD_FILE}|grep 'ERROR'|wc -l`
+
+echo "ERR_LOAD_IND="$ERR_LOAD_IND
+
+rm -f $ERR_LOAD_FILE
+}
+
+#######################################################################
+#Function to validate the loaded data against data in database
+#######################################################################
+validate_loaded_records ()
+{
+	      
+echo "In validate_loaded_records"
+
+export V_MAX_PYM_ALLOWED=$1
+
+echo "V_MAX_PYM_ALLOWED = "$V_MAX_PYM_ALLOWED
+
+export ERR_LOAD_FILE='ar.agencypymbckload.err'
+echo $ERR_LOAD_FILE
+
+sqlplus -s $ORA_CONNECT_STRING <<!
+
+spool $ERR_LOAD_FILE
+
+set serveroutput on;
+	      	      
+WHENEVER SQLERROR  EXIT SQL.SQLCODE;
+	      
+alter table load_agn_pym_bck_data add validation_status char(1);
+	      
+commit;
+	      
+DECLARE
+	      
+/* ---Declare cursor--- */
+CURSOR maincur IS
+select * from  load_agn_pym_bck_data;        
+	             
+/* ---Declare cursor record type ---*/
+rec maincur%ROWTYPE;
+	      
+/* ---Declare varaibles ---*/
+	      
+	      
+v_ban_ind                number(1);
+v_ban_status_ind         number(1);
+v_effective_payment_amt  number(12,2);
+v_max_pym_allowed        number(12,2);
+	      
+v_trx_count              number;
+	      
+BEGIN
+	      
+OPEN maincur;
+	      
+/* ---Start outer loop on cursor opened on table containing impacted record --*/
+v_trx_count:=0;
+v_ban_ind:=0;
+v_ban_status_ind:=0;
+v_max_pym_allowed:='$V_MAX_PYM_ALLOWED';
+
+ LOOP fetch maincur into rec;
+ exit when maincur%NOTFOUND;
+
+ 
+     /* --- Check if from_ban exists in system ---*/
+     
+     select count(1)
+     into v_ban_ind
+     from billing_account
+     where ban=rec.ban;
+     
+     if (v_ban_ind = 0)
+     then
+     
+         dbms_output.put_line('Failed validation of ban existance');
+         dbms_output.put_line('BAN='||rec.ban||'AMOUNT='||rec.amount);
+
+         update load_agn_pym_bck_data
+         set validation_status='N'
+         where ban=rec.ban
+         and amount=rec.amount;
+
+         goto label1;
+
+     end if;
+       
+     /* --- Check if ban status is tentative or closed or ban is prepaid ---*/
+     
+     select count(1)
+     into v_ban_status_ind
+     from billing_account
+     where ban=rec.ban
+     and (prepaid_ind='Y' or ban_status='T' or ban_status='C');
+     
+     if (v_ban_status_ind > 0)
+     then
+     
+
+         dbms_output.put_line('Failed validation of ban_status and prepaid status');
+         dbms_output.put_line('BAN='||rec.ban||'AMOUNT='||rec.amount);
+
+         update load_agn_pym_bck_data
+         set validation_status='N'
+         where ban=rec.ban
+         and amount=rec.amount;
+
+         goto label1;
+
+     end if;
+
+     if (abs(rec.amount) > v_max_pym_allowed)
+     then
+
+         dbms_output.put_line('Failed validation of amount');
+         dbms_output.put_line('BAN='||rec.ban||'AMOUNT='||rec.amount);
+
+
+         update load_agn_pym_bck_data
+         set validation_status='N'
+         where ban=rec.ban
+         and nvl(amount,0)=nvl(rec.amount,0);
+
+         goto label1;
+
+     end if;
+
+      /*---- Change #1 Starts----- */
+
+     if (rec.amount is null)
+     then
+         dbms_output.put_line('Amount is null');
+         dbms_output.put_line('BAN='||rec.ban||'AMOUNT='||rec.amount);
+
+          update load_agn_pym_bck_data
+         set validation_status='N'
+         where ban=rec.ban
+         and nvl(amount,0)=nvl(rec.amount,0);
+
+         goto label1;
+
+     end if; 
+
+     /*---- Change #1 Ends -----  */
+             
+      -- passed all validation so mark record to success
+ 
+         update load_agn_pym_bck_data
+         set validation_status='Y'
+         where ban=rec.ban
+         and amount=rec.amount;
+      
+           
+<<label1>>
+     v_trx_count:=v_trx_count+1; 
+
+  END LOOP;
+  EXCEPTION
+      WHEN OTHERS THEN
+              dbms_output.put_line ('ERROR');
+              dbms_output.put_line ('SQL error code   : '||SQLCODE);
+              dbms_output.put_line ('SQL error message: '||SQLERRM); 
+CLOSE maincur;
+END;
+/
+commit;
+
+spool off 
+
+set pages 0
+set colsep ','
+set lines 100
+set echo off
+set feed off
+set verify off
+set timing off
+
+spool $REJECT_FILE
+
+select ban,amount
+from load_agn_pym_bck_data
+where validation_status='N';
+spool off
+!
+
+
+export ERR_LOAD_IND=`less ${ERR_LOAD_FILE}|grep 'ERROR'|wc -l`
+echo "ERR_LOAD_IND="$ERR_LOAD_IND
+rm -f $ERR_LOAD_FILE
+
+echo "Completed validate_loaded_records"
+}
+#######################################################################
+# Start Main script
+#######################################################################
+
+export OP_JOB_NAME="ARCOLCHKLOAD"
+export OP_JOB_KEY="ENDDAY"
+
+# A/R common setting:
+
+. TlgGnInit_pr ar BATCH_DATE
+
+#######################################################
+#Connecting to DB.
+#######################################################
+
+TlgOraEnv
+
+export ORA_CONNECT_STRING=${TLG_ORA_USER}/${TLG_ORA_PASS}@${TLG_ORA_INST}
+echo $ORA_CONNECT_STRING
+
+#######################################################
+# Define Source and history directory
+#######################################################
+
+
+export TLG_BLK_FILE_IN=$TLG_AR_ROOT/inter/input/AGENCY_PYM
+export TLG_BLK_FILE_HST=$TLG_AR_ROOT/inter/history/AGENCY_PYM
+
+echo "Source Directory is $TLG_BLK_FILE_IN"
+echo "Target Directory is $TLG_BLK_FILE_HST"
+
+########################################################
+# Check for existance of source and history directory
+########################################################
+
+cd $TLG_BLK_FILE_IN
+
+if [ $? -ne 0 ]
+then
+
+  echo " Application  Failed as source directory $TLG_BLK_FILE_IN does not exist"
+  echo "Please contact Infra to create directory"
+  ExitProcess 1 
+
+fi
+
+
+cd $TLG_BLK_FILE_HST 
+
+if [ $? -ne 0 ]
+then
+
+  echo " Application  Failed as history directory $TLG_BLK_FILE_HST does not exist"                                                                         
+  echo "Please contact Infra to create directory"
+  ExitProcess 1 
+
+fi
+
+export DATE=$BATCH_DATE
+export TIME=`date +%H%M%S`
+
+cd $TLG_BLK_FILE_IN
+
+export FILE_COUNT=`ls -l ar.AGENCY*input.csv | grep -v err|wc -l`
+echo "File Count is "$FILE_COUNT
+
+
+if [ $FILE_COUNT -eq 0 ]
+then
+
+ cd $TLG_AR_ROOT/work
+ echo "File was not found - quitting process"
+ export MAIL_FILE='ar.MISSING_FILE_ALERT.'$DATE'_'$TIME'.layout'
+ echo "Hi">>$MAIL_FILE
+ echo "There was no input file to be loaded for Collection Agency payment/backout creation  job">>$MAIL_FILE
+ echo "There will be no Automatic payments/backouts to be created for today ">>$MAIL_FILE
+ echo "Todays date and time are">>$MAIL_FILE
+ echo `date`>>$MAIL_FILE
+ echo "This is a system generated message">>$MAIL_FILE
+ echo "Yours sincerely">>$MAIL_FILE
+ echo "The AR Team">>$MAIL_FILE
+ TlgFilePlacer \$MAIL_FILE SUCCESS
+ ExitProcess 0
+
+fi
+
+
+cd $TLG_BLK_FILE_IN
+export FILE_COUNTER=0
+
+
+for FILE_NAME in `ls ar.AGENCY*input.csv | grep -v err`
+do
+
+while true; do
+
+FILE_COUNTER=`expr $FILE_COUNTER + 1`
+
+cd $TLG_AR_ROOT/work
+
+echo "FILE_NAME = ${FILE_NAME}"
+
+if (test -r $TLG_BLK_FILE_IN/${FILE_NAME})
+then 
+
+  echo " File found by process"
+
+else
+
+  echo " File was not found - quitting process"
+  ExitProcess 2   
+  break
+fi  
+
+################################################################################
+# Define the failed file name
+################################################################################
+
+export FAIL_FILE_NAME=${FILE_NAME}.err
+
+# Define a switch for letting know if TLG_AR_WORK = TLG_AR_BULK_FNDT
+###################################################################
+TLG_AR_WORK_EQUAL_BULK_FNDT=0
+
+# Copying the file to TLG_AR_WORK area
+######################################
+if (test -r $TLG_AR_WORK/${FILE_NAME})
+then
+
+  echo " File is already in TLG_AR_WORK area"
+  ExitProcess 2
+  
+else
+  
+  cp $TLG_BLK_FILE_IN/${FILE_NAME} $TLG_AR_WORK 
+  TLG_AR_WORK_EQUAL_BULK_FNDT=1
+  
+fi  
+
+#############################################################################
+# From input file extract the AGENCY and CHEQUE_NO
+# These files are present in file name of input file
+#############################################################################
+
+
+export AGENCY=`echo $FILE_NAME|cut -d . -f 3`
+export CHEQUE_NO=`echo $FILE_NAME|cut -d . -f 4`
+
+#############################################################################
+#Preparing the input file for SQL loader
+#The input file received from interfaces has to be converted to a quoted file
+#############################################################################
+
+export QUOTED_FILE_NAME=${FILE_NAME}.quoted
+echo $QUOTED_FILE_NAME
+
+if(test -r $QUOTED_FILE_NAME)
+then
+
+  rm -f $QUOTED_FILE_NAME
+
+fi
+
+export TOT_COUNT=0
+export PYM_COUNT=0
+export PYM_TOTAL=0
+export BCK_COUNT=0
+export BCK_TOTAL=0
+
+       while read line_by_line
+       do
+                 
+               export ban=`echo $line_by_line|cut -d , -f 1`
+               export amount=`echo $line_by_line|cut -d , -f 2`
+               
+               quoted_rec='"'$ban'","'$amount'"'
+               echo $quoted_rec
+               echo $quoted_rec >>$QUOTED_FILE_NAME
+
+               if [ $amount -ge 0 ]
+               then
+
+                  PYM_COUNT=`expr $PYM_COUNT + 1`
+                  PYM_TOTAL=$( echo "scale=2; $PYM_TOTAL + $amount" | bc)
+                  echo amount
+                  echo $amount
+                  echo PYM_TOTAL
+                  echo $PYM_TOTAL
+               fi
+
+               if [ $amount -lt 0 ]
+               then
+
+                 BCK_COUNT=`expr $BCK_COUNT + 1`
+                 BCK_TOTAL=$( echo "scale=2; $BCK_TOTAL + $amount" | bc)
+               fi 
+
+               TOT_COUNT=`expr $TOT_COUNT + 1`
+             
+       done < ${FILE_NAME}  
+
+echo "TOTAL_COUNT="$TOT_COUNT
+echo "PAYMENT_COUNT="$PYM_COUNT
+echo "PAYMENT_TOTAL="$PYM_TOTAL
+echo "BACKOUT_COUNT="$BCK_COUNT
+echo "BACKOUT_TOTAL="$BCK_TOTAL
+
+#------- Change #2 Start ------
+
+if [ $PYM_TOTAL -gt  9999999999.99 ]
+then
+ echo " Too Much Amount " 
+ PYM_TOTAL=9999999999.99
+ export FILE_STATUS="AE"
+ load_to_colchq_file_control $FILE_NAME $AGENCY $CHEQUE_NO $FILE_STATUS $PYM_TOTAL $PYM_COUNT $BCK_TOTAL $BCK_COUNT $TOT_COUNT 
+ 
+ echo "Amount is very huge for a particular Payment entry"
+ echo "rejecting the whole file " $FILE_NAME  
+
+  ExitProcess 2
+  break
+fi
+
+if [ $BCK_TOTAL -lt  -9999999999.99 ]
+then
+ echo " Backout amount is too Low "
+ BCK_TOTAL=-9999999999.99
+ export FILE_STATUS="AE"
+ load_to_colchq_file_control $FILE_NAME $AGENCY $CHEQUE_NO $FILE_STATUS $PYM_TOTAL $PYM_COUNT $BCK_TOTAL $BCK_COUNT $TOT_COUNT
+
+ echo "Amount is too Low  for a particular Backout entry"
+ echo "rejecting the whole file " $FILE_NAME
+
+  ExitProcess 2
+  break
+fi
+
+#-------- Change #2 End -------
+
+#############################################################################
+# Verify duplicacy of input file
+#############################################################################
+
+export DUPLICATE_FILE_IND=0
+
+verify_duplicate_iput_file $FILE_NAME $AGENCY $CHEQUE_NO
+
+if [ $DUPLICATE_FILE_IND -ne 0 ]
+then
+
+ echo " Trying to reprocess processed file..."
+ echo $FILE_NAME
+ echo "File Duplicated"
+ cd $TLG_AR_ROOT/work
+ export DUPLICATE_FILE='ar.COLAGENCY_DUPLICATE_FILE.'$DATE'_'$TIME'.layout'
+ echo "Hi">>$DUPLICATE_FILE
+ echo "File is duplicated">>$DUPLICATE_FILE 
+ echo  $FILE_NAME >>$DUPLICATE_FILE
+ echo "is already processed earlier" >>$DUPLICATE_FILE
+ echo "so file rejected without processing" >>$DUPLICATE_FILE
+ echo "This is a system generated message">>$DUPLICATE_FILE
+ echo "Yours sincerely">>$DUPLICATE_FILE
+ echo "The AR Team">>$DUPLICATE_FILE
+ TlgFilePlacer \$DUPLICATE_FILE SUCCESS
+ ExitProcess 2
+ break
+
+fi
+
+
+##############################################################################
+# Load the file details in COLCHQ_FILE_CTRL
+##############################################################################
+
+export FILE_STATUS="IU"
+
+echo "FILE_NAME     ="$FILE_NAME
+echo "AGENCY        ="$AGENCY
+echo "CHEQUE_NO     ="$CHEQUE_NO
+echo "FILE_STATUS   ="$FILE_STATUS
+echo "PAYMENT_TOTAL ="$PYM_TOTAL
+echo "PAYMENT_COUNT ="$PYM_COUNT
+echo "BACKOUT_TOTAL ="$BCK_TOTAL
+echo "BACKOUNT_COUNT="$BCK_COUNT
+echo "TOTAL_COUNT   ="$TOT_COUNT
+
+load_to_colchq_file_control $FILE_NAME $AGENCY $CHEQUE_NO $FILE_STATUS $PYM_TOTAL $PYM_COUNT $BCK_TOTAL $BCK_COUNT $TOT_COUNT
+
+if [ $? -ne 0 ]
+then
+  echo "  Error occurred after load_to_colchq_file_control"
+  ExitProcess 2
+  break
+fi
+
+###############################################################################
+#Create temporary table to load the records
+###############################################################################
+
+create_temp_table
+
+if [ $? -ne 0 ]
+then
+
+  export FILE_STATUS="AE"
+  update_status_in_control $AGENCY $CHEQUE_NO $FILE_NAME $FILE_STATUS
+
+  echo " Application  Failed in create temporary table section."
+  ExitProcess 2  
+  break
+
+fi
+
+###############################################################################
+#Prepare arguments for sqlldr and call SQL LOADER
+###############################################################################
+
+export ERROR_FROM_LOAD=0
+
+export LOG_FILE='ar.aramAgencyLoad_'$DATE$TIME'_'$FILE_COUNTER'.log'
+echo $LOG_FILE
+
+export DATA_FILE=$QUOTED_FILE_NAME
+echo $DATA_FILE
+
+
+export ERROR_FILE='ar.aramAgencyLoad_'$DATE$TIME'_'$FILE_COUNTER'.error'
+echo $ERROR_FILE
+
+export DISCARD_FILE='ar.aramAgencyLoad_'$DATE$TIME'_'$FILE_COUNTER'.discard'
+echo $DISCARD_FILE
+
+
+
+export CONTROL_FILE='ar.aramAgencyLoad_'$DATE$TIME'_'$FILE_COUNTER'.ctl'
+echo $CONTROL_FILE
+
+echo 'LOAD DATA'>>$CONTROL_FILE
+echo 'INTO TABLE LOAD_AGN_PYM_BCK_DATA'>>$CONTROL_FILE
+echo '('>>$CONTROL_FILE
+echo BAN        INTEGER EXTERNAL TERMINATED BY \",\" ENCLOSED BY \'\"\', >>$CONTROL_FILE
+echo AMOUNT     INTEGER EXTERNAL TERMINATED BY \",\" ENCLOSED BY \'\"\'  >>$CONTROL_FILE
+echo ')'>>$CONTROL_FILE
+
+
+sqlldr $ORA_CONNECT_STRING control=$CONTROL_FILE log=$LOG_FILE data=$DATA_FILE  bad=$ERROR_FILE errors=10000 discard=$DISCARD_FILE
+
+retcode=`echo $?` 
+case "$retcode" in 
+0) echo "SQL*Loader execution successful" ;; 
+1) ERROR_FROM_LOAD=1 ;; 
+2) ERROR_FROM_LOAD=1 ;; 
+3) ExitProcess 2;; 
+*) ExitProcess 2;; 
+esac 
+
+################################################################################
+# Processing of errored records
+################################################################################
+
+export LOADER_REJ_CNT=0
+
+if [ $ERROR_FROM_LOAD -eq 1 ]
+then
+
+
+ if(test -s $ERROR_FILE)
+ then
+   export RECORDS_NOT_LOADED_FILE='ar.AgencyLoadRejectedRecord.'$DATE'_'$TIME'_'$FILE_COUNTER'.extract'
+   echo $RECORDS_NOT_LOADED_FILE
+ 
+   cp $ERROR_FILE $RECORDS_NOT_LOADED_FILE
+
+    echo "Above records in File " >>$RECORDS_NOT_LOADED_FILE
+    echo $FILE_NAME>>$RECORDS_NOT_LOADED_FILE
+    echo "are  not loaded as either ban or amount is in wrong format">>$RECORDS_NOT_LOADED_FILE
+    echo "This is a system generated message">>$RECORDS_NOT_LOADED_FILE
+    echo "Yours sincerely">>$RECORDS_NOT_LOADED_FILE
+    echo "The AR Team">>$RECORDS_NOT_LOADED_FILE
+   
+   TlgFilePlacer \$RECORDS_NOT_LOADED_FILE SUCCESS
+
+   export LOADER_REJ_CNT=`less $ERROR_FILE|wc -l`
+   echo "Total Number of Rejected Records = "$LOADER_REJ_CNT
+ fi
+
+fi
+
+##############################################################################
+# Processing of discarded records
+##############################################################################
+
+export LOADER_DISCARD_CNT=0
+
+if [ $ERROR_FROM_LOAD -eq 1 ]
+then
+ 
+ if(test -s $DISCARD_FILE)
+ then
+ 
+   export LOADER_DISCARD_CNT=`less $DISCARD_FILE|wc -l`
+   echo "Total Number of Discarded Records = "$LOADER_DISCARD_CNT
+ fi
+
+fi
+
+##############################################################################
+# Check the validity of records loaded
+##############################################################################
+
+ export FAILED_VALIDATION_CNT=0
+ export REJECT_FILE='ar.AgencyLoadFailedValidation.'$DATE'_'$TIME'.extract'
+ echo $REJECT_FILE
+
+###############################################################################
+# Get the operational paramet for MAX_PYM_ALLOWED
+###############################################################################
+
+#. argn_get_op_parm MAX_PYM_ALLOWED
+
+export MAX_PYM_ALLOWED=1000.00
+
+if [ $? -ne 0 ]
+then
+   export FILE_STATUS="AE"                                                                                                                
+   update_status_in_control $AGENCY $CHEQUE_NO $FILE_NAME $FILE_STATUS
+
+  echo "  Error occurred from argn_get_op_parm"
+  ExitProcess 2
+  break
+fi
+
+echo "MAX_PYM_ALLOWED ="$MAX_PYM_ALLOWED
+
+export ERR_LOAD_IND=0
+ 
+ validate_loaded_records $MAX_PYM_ALLOWED
+
+
+ export FAILED_VALIDATION_CNT=`less $REJECT_FILE|wc -l`
+
+ echo "Total Number of Records Failed Validation = "$FAILED_VALIDATION_CNT
+
+if(test -s $REJECT_FILE)
+then
+
+   echo "Above records in File " >>$REJECT_FILE
+   echo $FILE_NAME>>$REJECT_FILE
+   echo "are  not loaded as either ban or amount is not proper">>$REJECT_FILE
+   echo "This is a system generated message">>$REJECT_FILE
+   echo "Yours sincerely">>$REJECT_FILE
+   echo "The AR Team">>$REJECT_FILE
+ 
+  TlgFilePlacer \$REJECT_FILE SUCCESS 
+
+fi
+
+if [ $ERR_LOAD_IND -ne 0 ]
+then
+ export FILE_STATUS="AE"
+   update_status_in_control $AGENCY $CHEQUE_NO $FILE_NAME $FILE_STATUS
+
+ echo "Failed in validate_loaded_records"
+ 
+ ExitProcess 2
+ break
+fi
+#######################################################
+# Get the threshhold from the parameters table
+#######################################################
+
+#. argn_get_op_parm THRESH_HOLD 
+
+export THRESH_HOLD=10
+
+if [ $? -ne 0 ]
+then
+  export FILE_STATUS="AE"                                                                                                               
+  update_status_in_control $AGENCY $CHEQUE_NO $FILE_NAME $FILE_STATUS                   
+  echo "  Error occurred from argn_get_op_parm"
+  ExitProcess 2
+  break
+fi
+
+
+echo "Thresh Hold ="$THRESH_HOLD
+
+##############################################################################
+# Check whether number of rejected record crosses the threshhold
+##############################################################################
+
+echo "Total Number of Records in File = "$TOT_COUNT
+export TOTAL_RECORDS_REJ=0
+TOTAL_RECORDS_REJ=`expr $LOADER_REJ_CNT + $FAILED_VALIDATION_CNT`
+
+TOTAL_RECORDS_REJ=`expr $TOTAL_RECORDS_REJ + $LOADER_DISCARD_CNT`
+
+echo " Loader reject count ="$LOADER_REJ_CNT
+
+echo " Loader discard count="$LOADER_DISCARD_CNT
+
+echo "Total Records Rejected and not passed validation = "$TOTAL_RECORDS_REJ 
+
+ERROR_PRCNT=$( echo "scale=2; $TOTAL_RECORDS_REJ / $TOT_COUNT * 100" | bc )
+
+echo "Error Percentage = "$ERROR_PRCNT
+
+if [ $ERROR_PRCNT -gt $THRESH_HOLD ]
+then
+
+  export FILE_STATUS="AE"                                                                                                               
+  update_status_in_control $AGENCY $CHEQUE_NO $FILE_NAME $FILE_STATUS 
+                  
+  echo "The number of errors exceed thresh hold defined"
+  echo "Quiting Loading of data for this file"
+  ExitProcess 2
+  break
+
+fi
+
+
+##############################################################################
+#Load data into agency payment backout request table 
+###############################################################################
+export ERR_LOAD_IND=0
+load_to_agency_pym_bck_request $AGENCY $CHEQUE_NO
+
+if [ [ $? -ne 0 ] || [ $ERR_LOAD_IND -ne 0 ] ]  
+then
+ export FILE_STATUS="AE"
+   update_status_in_control $AGENCY $CHEQUE_NO $FILE_NAME $FILE_STATUS
+
+  delete_agency_entries $AGENCY $CHEQUE_NO
+
+  echo "  Error occurred after load_to_agency_pym_bck_request"
+  echo "  Might be agency details are not present in AGENCY_BANK DETAILS TABLE"
+  echo "  Or Problem while fetching file_seq_no from colchq_file_ctrl table. " 
+  echo "  Or Error while inserting data into agency_activities table" 
+  ExitProcess 2
+  break
+fi
+
+
+export FILE_STATUS="CO"
+update_status_in_control $AGENCY $CHEQUE_NO $FILE_NAME $FILE_STATUS
+
+##############################################################################
+# Declaring the new long file name for the file (after finishing with success)
+##############################################################################
+SUCC_FILE_NAME=${FILE_NAME}.success
+export SUCC_FILE_NAME
+
+
+
+# Handling case where job completes successfully
+# Remove file from work directory
+# Copy the file to directory where processed files are stored.
+
+if TLG_AR_WORK_EQUAL_BULK_FNDT=1
+then
+        
+  \rm $TLG_AR_WORK/$FILE_NAME
+          
+fi  
+        
+mv $TLG_BLK_FILE_IN/${FILE_NAME} $TLG_BLK_FILE_HST/${SUCC_FILE_NAME}
+
+if [ $? -ne 0 ]
+then
+
+  echo " Failed to move the file to history"
+  echo " Check for existance of directory $TLG_BLK_FILE_HST"
+  ExitProcess 2
+  break
+fi
+break
+done
+done                
+ExitProcess 0 
+        
+
+#------------------------- END OF PROCESS ----------------
+
+
