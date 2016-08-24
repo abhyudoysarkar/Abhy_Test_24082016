@@ -1,0 +1,310 @@
+#!/bin/ksh 
+
+################################################################################################
+# Name: ar9_extract_statute_barred_sh                                                          #
+# Author: NirSh	                                                                               #
+# Description: 1. Add header and trailer to file "ar9_extract_statute_barred_sh"               #
+#	       2. call java class (AR9InsertOutputFileToFC) with the appropriate parameters          #	 
+################################################################################################
+
+###########################################################################################
+# Change #1
+# Programmer  : Amiram Wingarten
+# Date       :      11/06/2006
+# version    : v606
+# Description: Defect #17116 imagine - Wrong DB connect parametersin AR scripts
+###########################################################################################
+# Change #2
+# Programmer   :A Sarkar
+# Date         :1-MAY-2010.
+# Description  :Improving performance of job currently running 6 hours
+###########################################################################################
+
+##########################################################################
+# OP9ExitStatus function                                                 #
+# Description: Performs ending activities, print ending messages         #
+#              and returns a status back to the user                     # 
+##########################################################################
+
+OP9ExitStatus()
+{
+case $1 in
+
+# Status handling for successfull run of the applicative script
+0)              echo " $0 has finished successfully \n "
+                exit 0;;
+
+# Status handling for Init status
+[1-39])         exit $1;;
+
+# Operational script execution failed.
+    40) echo "Failed to execute the operational script <${2}>"
+       exit ${1};;
+
+# Status handling for application errors   
+  41) echo "Encountered an error while excuting the process"
+       exit ${1};;
+# ...
+
+# status handling for unknown statuses
+*)              echo " Unknown return status $1 \n "
+                exit 99;;
+esac
+}
+
+
+#--- Start Change #2
+
+extract_data ()
+{
+
+echo "In extract_data"
+
+
+SYSDATE=`date "+%Y%m%d_%H%M%S"`
+export OUTPUT_NAME_SPACE_BLANK="ar.STATBARED_SPACE_BLANK_${SYSDATE}"
+echo "File with spaces and blank "$OUTPUT_NAME_SPACE_BLANK
+
+export OUTPUT_NAME_SPACE="ar.STATBARED_SPACE${SYSDATE}"
+echo "File with blank "$OUTPUT_NAME_SPACE
+
+
+export OUTPUT_FILE=$1
+export ORA_CONNECT_STRING=$2
+
+echo "OUTPUT_FILE="$OUTPUT_FILE
+echo "ORA_CONNECT_STRING="$ORA_CONNECT_STRING
+
+export LOGICAL_DATE=`sqlplus -s $ORA_CONNECT_STRING <<EOF2
+set linesize 10
+set echo off
+set feedback off
+set heading off;
+
+select to_char(logical_date,'YYYYMMDD')  from logical_date where logical_date_type='B' and expiration_date is null;
+
+exit;
+EOF2`
+
+echo "LOGICAL_DATE="$LOGICAL_DATE
+
+export PARAMETER=`sqlplus -s $ORA_CONNECT_STRING <<EOF3
+set linesize 10
+set echo off
+set feedback off
+set heading off;
+
+SELECT PARAMETER_VALUE FROM AR1_PROPERTIES WHERE PARAMETER_NAME = 'YEARS_BETWEEN_WRITE_OFF_AND_BARRED';
+
+exit;
+EOF3`
+
+echo "PARAMETER="$PARAMETER
+
+echo "About to execute SQL"
+
+
+sqlplus -s $ORA_CONNECT_STRING <<!
+
+WHENEVER SQLERROR  EXIT SQL.SQLCODE;
+set linesize 10
+set echo off
+set feedback off
+set heading off;
+
+spool $OUTPUT_NAME_SPACE_BLANK
+
+   select distinct(a.account_id)
+   from ar1_account a,ar1_write_off b,ar1_customer_credit c,ar1_payment d
+   where rtrim(a.write_off_status)='Y'
+   and rtrim(a.collection_indicator)='Y'
+   and rtrim(a.l9_statute_barred_ind) is null
+   and a.account_id=c.account_id
+   and (to_date($LOGICAL_DATE,'YYYYMMDD')-c.credit_date)/365>=$PARAMETER
+   and a.account_id=b.account_id
+   and (to_date($LOGICAL_DATE,'YYYYMMDD')-b.write_off_date)/365>=$PARAMETER
+   and a.account_id=d.account_id
+   and (to_date($LOGICAL_DATE,'YYYYMMDD')-d.activity_date)/365>=$PARAMETER;
+
+spool off
+
+   update ar1_account
+   set l9_statute_barred_ind='Y'
+   where account_id in (
+      select distinct(a.account_id)
+      from ar1_account a,ar1_write_off b,ar1_customer_credit c,ar1_payment d
+      where rtrim(a.write_off_status)='Y'
+      and rtrim(a.collection_indicator)='Y'
+      and rtrim(a.l9_statute_barred_ind) is null
+      and a.account_id=c.account_id
+      and (to_date($LOGICAL_DATE,'YYYYMMDD')-c.credit_date)/365>=$PARAMETER
+      and a.account_id=b.account_id
+      and (to_date($LOGICAL_DATE,'YYYYMMDD')-b.write_off_date)/365>=$PARAMETER
+      and a.account_id=d.account_id
+      and (to_date($LOGICAL_DATE,'YYYYMMDD')-d.activity_date)/365>=$PARAMETER
+   );
+   
+exit;
+!
+
+#Remove the blank line
+
+sed '/^$/d' ${OUTPUT_NAME_SPACE_BLANK} > ${OUTPUT_NAME_SPACE}
+
+#Remove the blank
+
+sed 's/[[:space:]]//g' ${OUTPUT_NAME_SPACE} > ${OUTPUT_FILE}
+
+rm -f ${OUTPUT_NAME_SPACE_BLANK}
+rm -f ${OUTPUT_NAME_SPACE}
+
+}
+
+#--- End Change #2
+
+############################
+# variables definition
+############################
+
+echo "**In AR9 Statute Barred *****************"
+
+#ET
+export ET1_PLUGIN_CLASSPATH=$ABP_PRIVATE_JAPP:$ABP_PRIVATE_JAPP/car${PROJ_CUST_VER}${OP1_BIT_MODE_FORMAT}/classes:${ABP_CUSTOM_JAPP}/car${PROJ_CUST_VER}${OP1_BIT_MODE_FORMAT}/lib/car9e_classes.jar
+ET1_PLUGIN_CLASSPATH=${ET1_PLUGIN_CLASSPATH}:${ABP_JAPP}/ggen${PROJ_VER}${OP1_BIT_MODE_FORMAT}/lib/ggn_classes.jar
+
+export ET1_DEPLOYMENT_PATH=$ABP_PRIVATE_ETC:$ABP_CUSTOM_JAPP/car${PROJ_CUST_VER}${OP1_BIT_MODE_FORMAT}/public/properties/et:$ABP_JAPP/gar${PROJ_VER}${OP1_BIT_MODE_FORMAT}/public/properties/et
+
+#The File Name's Format:
+SYSDATE=`date "+%Y%m%d_%H%M%S"`
+export OUTPUT_NAME="ar.STATBARED_${SYSDATE}"
+export OUTPUT_PATH="${ABP_AR_ROOT}/interfaces/output"
+${ABP_AR_WORK}
+. op_ar_env_sh
+. ar1_CentralInit_Sh
+# Change 2 Start
+database=$ARAPP_USER"/"$ARAPP_PASSWORD"@"$ARAPP_INSTANCE
+echo "database details from ARAPP:"
+# Change 2 End
+echo $database
+
+#--- Start Change #2
+#ET1_run_op_Sh
+
+echo "Calling extract data"
+
+extract_data $OUTPUT_NAME $database
+
+#--- End Change #2
+
+AR_EXIT_STAT=$?
+
+if [ ${AR_EXIT_STAT} -ne 0 ]
+then
+	echo "* RETURN_STATUS: $AR_EXIT_STAT"
+	echo "The process failed. Please check and re-run"
+	OP9ExitStatus $AR_EXIT_STAT
+fi
+
+
+mv ${OUTPUT_NAME} ${OUTPUT_PATH}/${OUTPUT_NAME}.output
+OUTPUT_PATH_NAME=${OUTPUT_PATH}/${OUTPUT_NAME}.output
+OUTPUT_NAME=${OUTPUT_NAME}.output
+
+chmod 777 ${OUTPUT_PATH_NAME}
+
+
+
+#for Java:
+SOURCEID=STB
+
+##############################
+# Add trailer to REPORT_NAME
+##############################
+
+typeset -i STB_FILE_NUM_OF_REC=`cat ${OUTPUT_PATH_NAME} | wc -l`
+
+# Adding trailer to ar.STATBARED${SYSDATE}.output
+echo T"|"${STB_FILE_NUM_OF_REC} >> ${OUTPUT_PATH_NAME}
+
+
+#############################
+# Add header to REPORT_NAME
+#############################
+
+#Calculate the unique FILE_SEQ_NO of the STB extract file:
+typeset -i FILESEQNUMBERS=$(sqlplus -s $database << SQL_COMMAND 
+set head off
+SELECT nvl(max(FILE_SEQ_NO),0) FROM AR9_FILES_CONTROL;
+exit;
+SQL_COMMAND
+)
+FILESEQNUMBERS=${FILESEQNUMBERS}+1
+
+# Clear spaces at the beginning of FileSeqNumber's value.
+echo ${FILESEQNUMBERS} > file
+sed 's/[[:space:]]//g' file
+FileSeqNumber=`cat file`
+
+# Check if SQL statement has successed 
+grep '[ERROR]' /tmp/tmpfile >> /tmp/stb_post_run.log 2>&1
+if [[ $? -eq 0 ]]
+
+then
+
+echo select query failed >> /tmp/stb_post_run.log 2>&1
+cat /tmp/stb_post_run.log
+exit -1
+
+fi
+
+
+echo H"|"${SYSDATE}"|"${FILESEQNUMBERS} > file
+cat ${OUTPUT_PATH_NAME} >> file
+mv file $OUTPUT_PATH_NAME
+
+##############################################
+# call java class (AR9InsertOutputFileToFC)
+##############################################
+#Calculate the unique FILES_CONTROL_ID of the STB extract file:
+typeset -i FILESCONTROLID=$(sqlplus -s $database << SQL_COMMAND 
+set head off
+SELECT TRUNC(AR9_FILES_CONTROL_ID_SEQ.nextval) FROM dual;
+exit;
+SQL_COMMAND
+)
+# Clear spaces at the beginning of FilesControlId's value.
+echo ${FILESCONTROLID} > file
+sed 's/[[:space:]]//g' file
+FILESCONTROLID=`cat file`
+
+# Check if SQL statement has successed 
+grep '[ERROR]' /tmp/tmpfile >> /tmp/stb_post_run.log 2>&1
+if [[ $? -eq 0 ]]
+then
+echo select query failed >> /tmp/stb_post_run.log 2>&1
+cat /tmp/stb_post_run.log
+exit -1
+fi
+
+echo "execute the Java...\n"
+
+
+java $BIT -Damdocs.system.home=$AMDOCS_SYSTEM_HOME amdocs.ar.general.util.AR9InsertOutputFileToFC AR9 ${STB_FILE_NUM_OF_REC} ${OUTPUT_NAME} ${OUTPUT_PATH} ${SYSDATE} ${SOURCEID} ${FILESEQNUMBERS} "" ${FILESCONTROLID}
+java $BIT -Damdocs.system.home=$AMDOCS_SYSTEM_HOME amdocs.ar.general.util.InsertOutputFileToAC AR9STBEXT ARSTBEXT ${STB_FILE_NUM_OF_REC} ${OUTPUT_NAME} ${OUTPUT_PATH} AR AR9_TO_PG
+
+AR_EXIT_STAT=$? 
+echo "* RETURN_STATUS: $AR_EXIT_STAT"
+                                     
+if [[ ${AR_EXIT_STAT} -ne 0 ]]
+then
+        echo "The process failed. Please check and re-run"
+	OP9ExitStatus ${AR_EXIT_STAT}
+else
+        echo "Statute barred extract process finished sucessfully!!!"
+fi
+
+#########################################################################
+# If script has reached this stage, it has finished successfully,       #
+# please do <OP9ExitStatus 0>                                           #
+#########################################################################
+OP9ExitStatus 0
