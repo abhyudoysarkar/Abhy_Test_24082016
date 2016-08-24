@@ -1,4 +1,4 @@
-#!/bin/ksh -vx
+#!/bin/ksh
 #====================================================================
 #Program Name:aramLoadPymBckSh
 #Description:Load Payment and backout data received as csv to table
